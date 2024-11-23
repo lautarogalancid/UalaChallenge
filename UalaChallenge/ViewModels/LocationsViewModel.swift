@@ -36,7 +36,6 @@ class LocationsViewModel: LocationsViewModelProtocol {
         self.locationService = locationService
         self.favoritesService = favoritesService
         
-        // Añadir debounce para el campo de búsqueda
         $searchText
             .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
             .sink { [weak self] newValue in
@@ -91,11 +90,15 @@ class LocationsViewModel: LocationsViewModelProtocol {
     }
 
     private func filterLocations() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let filtered = self.locations.filter { location in
-                self.searchText.isEmpty || location.name.lowercased().hasPrefix(self.searchText.lowercased())
+        Task {
+            let locationsToFilter: [LocationDomainModel] = await MainActor.run { self.locations }
+            let searchQuery: String = await MainActor.run { self.searchText }
+            
+            let filtered = locationsToFilter.filter { location in
+                searchQuery.isEmpty || location.name.lowercased().hasPrefix(searchQuery.lowercased())
             }
-            DispatchQueue.main.async {
+            
+            await MainActor.run {
                 self.filteredLocations = filtered
             }
         }
