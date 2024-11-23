@@ -22,48 +22,38 @@ protocol LocationsViewModelProtocol: ObservableObject {
 class LocationsViewModel: LocationsViewModelProtocol {
     private let locationService: LocationServiceProtocol
     private let favoritesService: FavoritesServiceProtocol
-    private var cancellables = Set<AnyCancellable>()
 
     @Published private(set) var filteredLocations: [LocationDomainModel] = []
     @Published var errorMessage: String?
-    @Published var searchText: String = "" {
-        didSet {
-            debounceSearch()
-        }
-    }
-    @Published var selectedLocationID: Int?
+    @Published var searchText: String = ""
 
     private var locations: [LocationDomainModel] = []
+    private var cancellables = Set<AnyCancellable>()
+
+    @Published var selectedLocationID: Int?
 
     init(locationService: LocationServiceProtocol, favoritesService: FavoritesServiceProtocol) {
         self.locationService = locationService
         self.favoritesService = favoritesService
-
-        setupSearchDebounce()
+        
+        // Añadir debounce para el campo de búsqueda
+        $searchText
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .sink { [weak self] newValue in
+                self?.filterLocations()
+            }
+            .store(in: &cancellables)
     }
 
     func loadLocations() async {
         do {
-            let loadedLocations = try await Task.detached { () -> [LocationDomainModel] in
-                let fetchedLocations = try await self.locationService.fetchLocations()
-                return fetchedLocations
-            }.value
-
-            let sortedLocations = try await Task.detached { () -> [LocationDomainModel] in
-                return loadedLocations.sorted { lhs, rhs in
-                    if lhs.name == rhs.name {
-                        return lhs.country < rhs.country
-                    }
-                    return lhs.name < rhs.name
-                }
-            }.value
-
+            let loadedLocations = try await locationService.fetchLocations()
+            let sortedLocations = sortLocations(loadedLocations)
             await MainActor.run {
                 self.locations = sortedLocations
                 self.filteredLocations = sortedLocations
             }
-
-            await loadFavorites()
+            loadFavorites()
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription
@@ -79,20 +69,20 @@ class LocationsViewModel: LocationsViewModelProtocol {
         Task { @MainActor in
             locations[index].isFavorite.toggle()
             saveFavorites()
-            await filterLocations()
+            filterLocations()
         }
     }
 
-    private func loadFavorites() async {
+    private func loadFavorites() {
         let favoriteIDs = favoritesService.loadFavorites()
-        await MainActor.run {
+        Task { @MainActor in
             for id in favoriteIDs {
                 if let index = locations.firstIndex(where: { $0.id == id }) {
                     locations[index].isFavorite = true
                 }
             }
+            filterLocations()
         }
-        await filterLocations()
     }
 
     private func saveFavorites() {
@@ -100,34 +90,15 @@ class LocationsViewModel: LocationsViewModelProtocol {
         favoritesService.saveFavorites(favoriteIDs)
     }
 
-    private func filterLocations() async {
-        let searchTextLowercased = searchText.lowercased()
-
-        let filtered = await Task.detached { [locations] in
-            return locations.filter { location in
-                searchTextLowercased.isEmpty || location.name.lowercased().hasPrefix(searchTextLowercased)
+    private func filterLocations() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let filtered = self.locations.filter { location in
+                self.searchText.isEmpty || location.name.lowercased().hasPrefix(self.searchText.lowercased())
             }
-        }.value
-
-        await MainActor.run {
-            self.filteredLocations = filtered
+            DispatchQueue.main.async {
+                self.filteredLocations = filtered
+            }
         }
-    }
-
-    private func setupSearchDebounce() {
-        $searchText
-            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                Task {
-                    await self?.filterLocations()
-                }
-            }
-            .store(in: &cancellables)
-    }
-
-    private func debounceSearch() {
-        setupSearchDebounce()
     }
 
     private func sortLocations(_ locations: [LocationDomainModel]) -> [LocationDomainModel] {
